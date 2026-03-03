@@ -103,3 +103,15 @@ function formatResponse(primary: any, all: any[]) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Doc's tracker running on port ${PORT}`));
+
+
+
+// Test the connection immediately
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('❌ Supabase Connection Error:', err.message);
+    console.error('Check your DATABASE_URL and ensure your password is encoded.');
+  } else {
+    console.log('✅ Successfully connected to Supabase at:', res.rows[0].now);
+  }
+});
