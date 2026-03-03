@@ -8,18 +8,28 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Serve the UI files from the 'public' folder
-app.use(express.static(path.join(__dirname, '../public')));
+// FIXED: Use process.cwd() to ensure the 'public' folder is found correctly on Render
+const publicPath = path.join(process.cwd(), 'public');
+app.use(express.static(publicPath));
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Required for Render/Supabase connection
+// FIXED: Explicitly serve index.html when users visit the root URL
+app.get('/', (req: Request, res: Response) => {
+  res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-// Test Database Connection
+// Database Connection Setup
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // Required for Supabase/Render
+});
+
+// Health Check: Test Database Connection on startup
 pool.query('SELECT NOW()', (err) => {
-  if (err) console.error('❌ Database connection failed:', err.stack);
-  else console.log('✅ Connected to Supabase successfully.');
+  if (err) {
+    console.error('❌ Database connection failed:', err.stack);
+  } else {
+    console.log('✅ Connected to Supabase successfully.');
+  }
 });
 
 app.post('/identify', async (req: Request, res: Response) => {
@@ -53,7 +63,7 @@ app.post('/identify', async (req: Request, res: Response) => {
     let allRelated = clusterRes.rows;
 
     // 4. Identify the True Primary (the oldest one)
-    allRelated.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    allRelated.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     const primaryContact = allRelated.find(c => c.linkPrecedence === 'primary') || allRelated[0];
 
     // 5. Logic: Check if we need to create a new Secondary record
@@ -76,7 +86,6 @@ app.post('/identify', async (req: Request, res: Response) => {
         `UPDATE "Contact" SET "linkPrecedence" = 'secondary', "linkedId" = $1, "updatedAt" = NOW() WHERE "id" = $2`,
         [primaryContact.id, p.id]
       );
-      // Update local state to reflect change for the response
       p.linkPrecedence = 'secondary';
       p.linkedId = primaryContact.id;
     }
@@ -104,5 +113,8 @@ function formatResponse(primary: any, all: any[]) {
   };
 }
 
+// FIXED: Render uses the PORT environment variable
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server live on port ${PORT}`));
+app.listen(Number(PORT), '0.0.0.0', () => {
+  console.log(`Server live on port ${PORT}`);
+});
