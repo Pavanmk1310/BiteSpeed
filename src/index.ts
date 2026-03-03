@@ -18,10 +18,12 @@ app.get('/', (req: Request, res: Response) => {
 
 // Database Connection
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  host: 'aws-1-ap-southeast-2.pooler.supabase.com',
+  port: 6543,
+  database: 'postgres',
+  user: 'postgres.lxkpauvxepbgktrunblm',
+  password: 'Pavan@13102004',
+  ssl: { rejectUnauthorized: false }
 });
 
 // Test DB connection
@@ -159,7 +161,7 @@ function formatResponse(primary: any, all: any[]) {
 
   return {
     contact: {
-      primaryContactId: primary.id,   // ✅ FIXED TYPO
+      primaryContactId: primary.id,
       emails,
       phoneNumbers: phones,
       secondaryContactIds: secondaryIds
