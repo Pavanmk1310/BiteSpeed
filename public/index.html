@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Identity Tracker</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
+        input { display: block; width: 100%; margin: 10px 0; padding: 10px; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; cursor: pointer; }
+        pre { background: #f4f4f4; padding: 15px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h2>Check Identity</h2>
+    <input type="email" id="email" placeholder="Email">
+    <input type="text" id="phone" placeholder="Phone Number">
+    <button onclick="identify()">Identify</button>
+    <h3>Result:</h3>
+    <pre id="output">Submit the form to see results...</pre>
+
+    <script>
+        async function identify() {
+            const res = await fetch('/identify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: document.getElementById('email').value || null,
+                    phoneNumber: document.getElementById('phone').value || null
+                })
+            });
+            const data = await res.json();
+            document.getElementById('output').innerText = JSON.stringify(data, null, 2);
+        }
+    </script>
+</body>
+</html>
