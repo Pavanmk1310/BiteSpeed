@@ -8,113 +8,167 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// FIXED: Use process.cwd() to ensure the 'public' folder is found correctly on Render
+// Serve static files
 const publicPath = path.join(process.cwd(), 'public');
 app.use(express.static(publicPath));
 
-// FIXED: Explicitly serve index.html when users visit the root URL
 app.get('/', (req: Request, res: Response) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-// Database Connection Setup
+// Database Connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Required for Supabase/Render
-});
-
-// Health Check: Test Database Connection on startup
-pool.query('SELECT NOW()', (err) => {
-  if (err) {
-    console.error('❌ Database connection failed:', err.stack);
-  } else {
-    console.log('✅ Connected to Supabase successfully.');
+  ssl: {
+    rejectUnauthorized: false
   }
 });
+
+// Test DB connection
+pool.query('SELECT NOW()')
+  .then(() => console.log('✅ Connected to Supabase successfully.'))
+  .catch((err) => console.error('❌ Database connection failed:', err.stack));
 
 app.post('/identify', async (req: Request, res: Response) => {
   const { email, phoneNumber } = req.body;
   const phoneStr = phoneNumber ? String(phoneNumber) : null;
 
+  const client = await pool.connect();
+
   try {
-    // 1. Find all contacts matching either email or phone
-    const searchRes = await pool.query(
-      `SELECT * FROM "Contact" WHERE "email" = $1 OR "phoneNumber" = $2`,
+    await client.query('BEGIN');
+
+    // 1️⃣ Find contacts matching email or phone (ignore deleted)
+    const searchRes = await client.query(
+      `SELECT * FROM "Contact"
+       WHERE ("email" = $1 OR "phoneNumber" = $2)
+       AND "deletedAt" IS NULL`,
       [email, phoneStr]
     );
+
     let matchedContacts = searchRes.rows;
 
-    // 2. Scenario: No existing contact found
+    // 2️⃣ If no match → create new primary
     if (matchedContacts.length === 0) {
-      const newContact = await pool.query(
-        `INSERT INTO "Contact" ("email", "phoneNumber", "linkPrecedence") 
-         VALUES ($1, $2, 'primary') RETURNING *`,
+      const newContact = await client.query(
+        `INSERT INTO "Contact" ("email", "phoneNumber", "linkPrecedence")
+         VALUES ($1, $2, 'primary')
+         RETURNING *`,
         [email, phoneStr]
       );
-      return res.status(200).json(formatResponse(newContact.rows[0], []));
+
+      await client.query('COMMIT');
+
+      return res.status(200).json(
+        formatResponse(newContact.rows[0], [])
+      );
     }
 
-    // 3. Find the "Cluster" (all contacts linked to our matches)
-    const primaryIds = new Set(matchedContacts.map(c => c.linkedId || c.id));
-    const clusterRes = await pool.query(
-      `SELECT * FROM "Contact" WHERE "id" = ANY($1::int[]) OR "linkedId" = ANY($1::int[])`,
-      [Array.from(primaryIds)]
+    // 3️⃣ Collect all related contacts (cluster)
+    const ids = matchedContacts.map(c => c.linkedId || c.id);
+
+    const clusterRes = await client.query(
+      `SELECT * FROM "Contact"
+       WHERE ("id" = ANY($1::int[]) OR "linkedId" = ANY($1::int[]))
+       AND "deletedAt" IS NULL`,
+      [ids]
     );
+
     let allRelated = clusterRes.rows;
 
-    // 4. Identify the True Primary (the oldest one)
-    allRelated.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    const primaryContact = allRelated.find(c => c.linkPrecedence === 'primary') || allRelated[0];
+    // 4️⃣ Identify true primary (oldest)
+    allRelated.sort(
+      (a, b) =>
+        new Date(a.createdAt).getTime() -
+        new Date(b.createdAt).getTime()
+    );
 
-    // 5. Logic: Check if we need to create a new Secondary record
-    const isNewEmail = email && !allRelated.some(c => c.email === email);
-    const isNewPhone = phoneStr && !allRelated.some(c => c.phoneNumber === phoneStr);
+    const primaryContact =
+      allRelated.find(c => c.linkPrecedence === 'primary') ||
+      allRelated[0];
+
+    // 5️⃣ Check if new secondary needed
+    const isNewEmail =
+      email && !allRelated.some(c => c.email === email);
+
+    const isNewPhone =
+      phoneStr && !allRelated.some(c => c.phoneNumber === phoneStr);
 
     if (isNewEmail || isNewPhone) {
-      const newSecondary = await pool.query(
-        `INSERT INTO "Contact" ("email", "phoneNumber", "linkedId", "linkPrecedence") 
-         VALUES ($1, $2, $3, 'secondary') RETURNING *`,
+      const newSecondary = await client.query(
+        `INSERT INTO "Contact"
+         ("email", "phoneNumber", "linkedId", "linkPrecedence")
+         VALUES ($1, $2, $3, 'secondary')
+         RETURNING *`,
         [email, phoneStr, primaryContact.id]
       );
+
       allRelated.push(newSecondary.rows[0]);
     }
 
-    // 6. Logic: Merge existing Primaries if necessary
-    const otherPrimaries = allRelated.filter(c => c.linkPrecedence === 'primary' && c.id !== primaryContact.id);
+    // 6️⃣ Merge multiple primaries if present
+    const otherPrimaries = allRelated.filter(
+      c => c.linkPrecedence === 'primary' && c.id !== primaryContact.id
+    );
+
     for (const p of otherPrimaries) {
-      await pool.query(
-        `UPDATE "Contact" SET "linkPrecedence" = 'secondary', "linkedId" = $1, "updatedAt" = NOW() WHERE "id" = $2`,
+      await client.query(
+        `UPDATE "Contact"
+         SET "linkPrecedence" = 'secondary',
+             "linkedId" = $1,
+             "updatedAt" = NOW()
+         WHERE "id" = $2`,
         [primaryContact.id, p.id]
       );
+
       p.linkPrecedence = 'secondary';
       p.linkedId = primaryContact.id;
     }
 
-    res.status(200).json(formatResponse(primaryContact, allRelated));
+    await client.query('COMMIT');
+
+    return res.status(200).json(
+      formatResponse(primaryContact, allRelated)
+    );
 
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error(error);
-    res.status(500).json({ error: "Internal Server Error" });
+    return res.status(500).json({ error: "Internal Server Error" });
+  } finally {
+    client.release();
   }
 });
 
 function formatResponse(primary: any, all: any[]) {
-  const emails = Array.from(new Set([primary.email, ...all.map(c => c.email)].filter(Boolean)));
-  const phones = Array.from(new Set([primary.phoneNumber, ...all.map(c => c.phoneNumber)].filter(Boolean)));
-  const secondaryIds = all.filter(c => c.id !== primary.id).map(c => c.id);
+  const emails = Array.from(
+    new Set(
+      [primary.email, ...all.map(c => c.email)].filter(Boolean)
+    )
+  );
+
+  const phones = Array.from(
+    new Set(
+      [primary.phoneNumber, ...all.map(c => c.phoneNumber)].filter(Boolean)
+    )
+  );
+
+  const secondaryIds = all
+    .filter(c => c.id !== primary.id)
+    .map(c => c.id);
 
   return {
     contact: {
-      primaryContatctId: primary.id,
-      emails: emails,
+      primaryContactId: primary.id,   // ✅ FIXED TYPO
+      emails,
       phoneNumbers: phones,
       secondaryContactIds: secondaryIds
     }
   };
 }
 
-// FIXED: Render uses the PORT environment variable
+// Render-safe port binding
 const PORT = process.env.PORT || 3000;
 app.listen(Number(PORT), '0.0.0.0', () => {
-  console.log(`Server live on port ${PORT}`);
+  console.log(`🚀 Server live on port ${PORT}`);
 });
